@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model movies {
+  movie_id          String              @id @db.Uuid
+  title             String              @db.VarChar(255)
+  release_year      String?
+  poster_url        String?             @db.VarChar(255)
+  rating            String?             @db.VarChar(255)
+  genres            String[]
+  tmdb_id           Int?
+  user_saved_movies user_saved_movies[]
+}
+
+model user_saved_movies {
+  id       Int       @id @default(autoincrement())
+  user_id  Int
+  movie_id String    @db.Uuid
+  saved_at DateTime? @default(now()) @db.Timestamp(6)
+  tmdb_id  Int?
+  movies   movies    @relation(fields: [movie_id], references: [movie_id], onDelete: SetNull, onUpdate: SetDefault, map: "user_saved_movies_relation_2")
+  users    users     @relation(fields: [user_id], references: [user_id], onDelete: SetNull, onUpdate: SetDefault, map: "user_saved_movies_relation_3")
+}
+
+model users {
+  user_id           Int                 @id @default(autoincrement())
+  created_at        DateTime            @default(now()) @db.Timestamp(6)
+  username          String?             @db.VarChar(255)
+  email             String?             @db.VarChar(255)
+  password          String?             @db.VarChar(255)
+  user_saved_movies user_saved_movies[]
+}
