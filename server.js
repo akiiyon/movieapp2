@@ -1,12 +1,12 @@
 // server.js
 
 const express = require("express");
-
-// import { PrismaPg } from '@prisma/adapter-pg'
 const { PrismaPg } = require("@prisma/adapter-pg");
 const { PrismaClient } = require("@prisma/client");
+const cors = require('cors');
 const { randomUUID } = require("crypto");
 var dotenv = require("dotenv");
+const OpenAI = require("openai");
 
 dotenv.config();
 
@@ -21,15 +21,22 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 const axios = require("axios");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// Initialize Gemini (Replace with your actual API Key)
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+//AI Model
+const { GoogleGenAI } = require("@google/genai");
+const ai = new GoogleGenAI({});
+
+const client = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY, 
+  baseURL: "https://api.groq.com/openai/v1",
+});
+
+
 // const { authenticateToken } = require('./middleware/auth'); // Ensure this path is correct
 
 // Middleware to parse JSON bodies
 app.use(express.json());
+app.use(cors());
 
 ///////////////////////////////////////////////////////////////////////////////
 const authenticateToken = (req, res, next) => {
@@ -74,7 +81,8 @@ async function generateUniqueMovieId() {
 
   return newId;
 }
-////////////
+
+//////////////////////////////////////////////////////////
 // Basic health check endpoint
 app.get("/", (req, res) => {
   res.send("Movie Suggestion App Backend is running!");
@@ -87,7 +95,7 @@ app.get("/api/movies/search", async (req, res) => {
   if (!query) {
     return res.status(400).json({ error: "Query parameter is required" });
   }
-  console.log(process.env.TMDB_API_KEY);
+  // console.log(process.env.TMDB_API_KEY);
 
   try {
     const response = await axios.get(
@@ -162,6 +170,7 @@ app.post("/api/movies/save", authenticateToken, async (req, res) => {
         headers: { Authorization: `Bearer ${process.env.TMDB_API_KEY}` },
       });
       const movieData = response.data;
+    //   console.log(movieData);
 
       // Extract genres (TMDB returns array of objects like [{id: 1, name: "Action"}])
       // We just want ["Action", "Thriller"]
@@ -170,7 +179,9 @@ app.post("/api/movies/save", authenticateToken, async (req, res) => {
         : [];
 
       // Save to 'movies' table
-
+      var new_movie_id =await generateUniqueMovieId();
+      console.log(new_movie_id);
+      
       movie = await prisma.movies.create({
         data: {
           movie_id: new_movie_id,
@@ -232,6 +243,38 @@ app.post("/api/movies/save", authenticateToken, async (req, res) => {
 const bcrypt = require("bcrypt");
 const saltRounds = 10;
 
+//get user details
+app.get("/auth/userInfo", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.user_id;
+
+    // Use Prisma to find the unique user by their ID
+    const user = await prisma.users.findUnique({
+      where: {
+        user_id: userId, // Ensure this matches your Prisma schema field name (e.g., id or user_id)
+      },
+      // Optional: Select specific fields if you don't want to return everything (like passwords)
+      select: {
+        user_id: true,
+        username: true,
+        email: true,
+        // Add other fields you want to retrieve
+      }
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Prisma returns a plain object, so we can send it directly as JSON
+    res.json(user);
+
+  } catch (error) {
+    console.error("Error fetching user info:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.post("/auth/register", async (req, res) => {
   var { email, password, username } = req.body;
 
@@ -242,6 +285,15 @@ app.post("/auth/register", async (req, res) => {
   }
 
   try {
+    //check if user already exists
+    // const existingUser = await prisma.users.findUnique({
+    //         where: { email: email },
+    //     });
+
+    //     if (existingUser) {
+    //         return res.status(400).json({ error: 'User with this email already exists.' });
+    //     }
+
     // 1. Hash the pasword
     password = await bcrypt.hash(password, saltRounds);
 
@@ -273,6 +325,7 @@ app.post("/auth/register", async (req, res) => {
 });
 
 const jwt = require("jsonwebtoken");
+const { log } = require("console");
 
 app.post("/auth/login", async (req, res) => {
   const { email, password } = req.body;
@@ -319,15 +372,18 @@ app.post("/auth/login", async (req, res) => {
         email: user.email,
       },
     });
+    console.log(user);
   } catch (error) {
     console.error("Login error:", error); // Log the error object, not user data
     res.status(500).json({ error: "Internal server error during login." });
   }
 });
 
-app.post("/api/movies/recommendations", async (req, res) => {
-  const { user_id } = req.body;
-
+//RECOMMENDATIONS USING GEMINI
+app.get("/api/movies/recommendations",authenticateToken, async (req, res) => {
+  const { service } = req.query;
+  const user_id = req.user.user_id;
+  console.log(`user id is ${user_id}`);
   if (!user_id) {
     return res.status(400).json({ error: "User ID is required." });
   }
@@ -339,35 +395,124 @@ app.post("/api/movies/recommendations", async (req, res) => {
       include: { movies: true },
     });
 
-    if (savedMovies.length === 0) {
-      return res.json({
-        recommendations: [],
-        message: "No saved movies found to base recommendations on.",
-      });
-    }
+    // if (savedMovies.length === 0) {
+    //   return res.json({
+    //     recommendations: [],
+    //     message: "No saved movies found to base recommendations on.",
+    //   });
+    // }
 
     // 2. Extract movie titles to create a context string
-    const favoriteTitles = savedMovies
-      .map((item) => item.movies.title)
-      .join(", ");
+    // const favoriteTitles = savedMovies
+    //   .map((item) => item.movies.title)
+    //   .join(", ");
 
+
+    // console.log(savedMovies[0].title);
+
+    const prompt = `
+You are a knowledgeable film recommender.
+
+The user likes these movies:
+${savedMovies}
+
+Task:
+Recommend movies based ONLY on what can be inferred from these titles.
+
+Instructions:
+- Infer shared emotional tone, intensity, themes, and storytelling approach
+- Do NOT default to universally popular or all-time-great movies
+- Avoid slow, sentimental, or purely contemplative films
+  unless they are clearly implied by the input
+- Do not force a single genre or mood
+- Let multiple influences coexist, but keep recommendations
+  close in energy and narrative drive to the input
+
+Requirements:
+- Recommend high-quality, well-reviewed films
+- Each recommendation should feel plausible for this specific viewer
+
+Output:
+Return a JSON object with exactly one key: "recommendations"
+The value must be an array of exactly 5 movie titles (strings)
+Output JSON only. No explanations.
+
+    `;
+    console.log(service);
     // 3. Construct the Prompt
-    const prompt = `A user likes the following movies: ${favoriteTitles}. 
-      Based on these, recommend 5 similar movies. 
-      Return the response as a simple JSON array of strings containing only the movie titles.
-      Example format: ["Movie 1", "Movie 2", "Movie 3"]`;
+    // const prompt = `A user likes the following movies: ${savedMovies}. 
+    //   Based on these, recommend 5 similar movies of similar type.
+    //   Return the response as a simple JSON array of strings containing only the movie titles.
+    //   `;
+      
 
     // 4. Call Gemini
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
-
-    // 5. Parse and Clean the response
-    // (Gemini sometimes wraps JSON in markdown blocks like \`\`\`json)
-    const cleanedText = text.replace(/```json|```/g, "").trim();
-    const recommendations = JSON.parse(cleanedText);
-
-    res.json({ recommendations });
+    if(service=="gemini"){
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash", 
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json", // Enforces JSON output
+        }
+      });
+      console.log(response.text);
+      const rawText = response.text;
+  
+      // 5. Parse and Clean the response
+      // (Gemini sometimes wraps JSON in markdown blocks like \`\`\`json)
+      const cleanedText = rawText.replace(/```json|```/g, "").trim();
+      const recommendations = JSON.parse(cleanedText);  
+      res.json({ recommendations });
+    }else if(service=="groq"){
+      const completion = await client.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an expert film recommender. Analyze tone, intensity, pacing, and storytelling to infer user taste. Output valid JSON only."
+          },
+          {
+            role: "user",
+            content: `
+      User's favorite movies:
+      ${savedMovies}
+      
+      TASK:
+      Infer the user's taste from the shared tone, intensity, conflict, pacing, and narrative drive.
+      
+      INSTRUCTIONS:
+      - Base recommendations strictly on the given movies
+      - Match energy, seriousness, and narrative momentum
+      - Let multiple influences coexist naturally
+      - Avoid slow, sentimental, or purely conceptual films unless clearly implied
+      - Prefer films driven by human conflict and stakes
+      - Do not force a single genre or mood
+      
+      QUALITY BAR:
+      Recommend well-regarded, thoughtfully made films that a viewer with this mix of tastes would plausibly enjoy.
+      
+      OUTPUT:
+      Return a JSON object with one key: "recommendations"
+      The value must be an array of exactly 5 movie titles (strings).
+      Output JSON only.
+            `,
+          },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.55,
+      });
+      
+      
+      
+  
+      // 4. Parse the response
+      const content = completion.choices[0].message.content;
+      const parsedResult = JSON.parse(content);
+      res.json({ recommendations: parsedResult.recommendations });
+    }else{
+      res.status(400).json({ error: "Invalid service." });
+    }
   } catch (error) {
     console.error("Recommendations error:", error);
     res
