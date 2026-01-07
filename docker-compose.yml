@@ -1,0 +1,21 @@
+services:
+  # Database service
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 7854
+      POSTGRES_DB: whatiwatch
+    ports:
+      - "3000:3000"
+
+  # Backend service
+  backend:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      # Note: 'db' matches the service name above
+      DATABASE_URL: "postgresql://postgres:7854@localhost:3000/whatiwatch?schema=public"
+    depends_on:
+      - db
