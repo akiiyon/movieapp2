@@ -118,23 +118,31 @@ app.get("/api/movies/search", async (req, res) => {
   }
 });
 
+// fetch saved movies
 app.get("/api/movies/saved", authenticateToken, async (req, res) => {
   try {
-    const savedMovies = await prisma.user_saved_movies.findMany({
+    const savedEntries = await prisma.user_saved_movies.findMany({
       where: {
-        user_id: req.user.user_id, // Filter by current user
+        user_id: req.user.user_id,
       },
       include: {
-        movies: true, // Join with the Movies table to get title, poster, etc.
+        movies: true, // Fetch the related movie data
       },
       orderBy: {
-        saved_at: "desc", // Newest saved first
+        saved_at: "desc",
       },
     });
 
-    console.log(savedMovies);
+    // 🔥 CHANGE: Extract only the 'movies' object from each entry
+    // This turns [ { id: 1, movies: { title: "..." } } ] 
+    // into [ { title: "..." } ]
+    const moviesOnly = savedEntries.map((entry) => entry.movies);
 
-    res.json(savedMovies);
+    console.log(`Fetched ${moviesOnly.length} saved movies.`);
+    
+    // Send the flattened array of movie objects
+    res.json(moviesOnly);
+
   } catch (error) {
     console.error("Fetch Saved Error:", error);
     res.status(500).json({ error: "Failed to fetch saved movies." });
@@ -148,6 +156,8 @@ app.post("/api/movies/save", authenticateToken, async (req, res) => {
   const { tmdb_id } = req.body; // Expecting { "tmdb_id": 550 } from Flutter
   const user_id = req.user.user_id; // Got from the JWT token
 
+  console.log(tmdb_id);
+  
   if (!tmdb_id) {
     return res.status(400).json({ error: "Movie ID (tmdb_id) is required." });
   }
@@ -182,7 +192,8 @@ app.post("/api/movies/save", authenticateToken, async (req, res) => {
       var new_movie_id =await generateUniqueMovieId();
       console.log(new_movie_id);
       
-      movie = await prisma.movies.create({
+      try {
+        movie = await prisma.movies.create({
         data: {
           movie_id: new_movie_id,
           tmdb_id: movieData.id,
@@ -197,10 +208,13 @@ app.post("/api/movies/save", authenticateToken, async (req, res) => {
           rating: movieData.vote_average.toString(),
         },
       });
+      console.log("done");
+      } catch (error) {
+        console.log(e);
+      }
       console.log(`Movie '${movie.title}' cached in local DB.`);
     }
 
-    console.log(typeof tmdb_id);
 
     // 3. Link movie to the user (Handle duplicates)
     // Check if already saved
@@ -236,6 +250,31 @@ app.post("/api/movies/save", authenticateToken, async (req, res) => {
     }
 
     res.status(500).json({ error: "Failed to save movie." });
+  }
+});
+
+// POST /api/movies/reject
+app.post("/api/movies/reject", authenticateToken, async (req, res) => {
+  const { tmdb_id,title } = req.body;
+  const user_id = req.user.user_id;
+
+  try {
+    await prisma.rejected_movies.create({
+      data: {
+        user_id: user_id,
+        tmdb_id: tmdb_id,
+        title: title
+      },
+    });
+    res.status(200).json({ message: "Movie rejected" });
+  } catch (error) {
+    // Check if error is a "Unique constraint failed" (P2002)
+    if (error.code === 'P2002') {
+      return res.status(200).json({ message: "Movie already rejected" });
+    }
+    
+    console.error("Rejection Error:", error);
+    res.status(500).json({ error: "Could not record rejection" });
   }
 });
 
@@ -359,7 +398,7 @@ app.post("/auth/login", async (req, res) => {
     const token = jwt.sign(
       { user_id: user.user_id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: "7d"}
     );
 
     // 6. Respond (Exclude sensitive data like password_hash)
@@ -379,145 +418,140 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
-//RECOMMENDATIONS USING GEMINI
-app.get("/api/movies/recommendations",authenticateToken, async (req, res) => {
+// server.js (Updated Recommendations Route)
+
+app.get("/api/movies/recommendations", authenticateToken, async (req, res) => {
   const { service } = req.query;
   const user_id = req.user.user_id;
-  console.log(`user id is ${user_id}`);
+
   if (!user_id) {
     return res.status(400).json({ error: "User ID is required." });
   }
 
   try {
-    // 1. Fetch saved movies from Prisma
+    // 1. Fetch Liked Movie Titles (Via Relation)
     const savedMovies = await prisma.user_saved_movies.findMany({
       where: { user_id: user_id },
       include: { movies: true },
     });
+    const movieTitles = savedMovies.map((m) => m.movies.title).join(", ");
+    console.log(movieTitles);
+    
 
-    // if (savedMovies.length === 0) {
-    //   return res.json({
-    //     recommendations: [],
-    //     message: "No saved movies found to base recommendations on.",
-    //   });
-    // }
+    // 2. Fetch Rejected Movie IDs
+    const rejectedRecords = await prisma.rejected_movies.findMany({
+      where: { user_id: user_id },
+      select: { tmdb_id: true,title:true }
+    });
 
-    // 2. Extract movie titles to create a context string
-    // const favoriteTitles = savedMovies
-    //   .map((item) => item.movies.title)
-    //   .join(", ");
+    // 3. Fetch Rejected Titles (Manual search since no relation exists)
+    // const rejectedIds = rejectedRecords.map(r => r.tmdb_id);
+    // const rejectedMoviesData = await prisma.movies.findMany({
+    //   where: { tmdb_id: { in: rejectedIds } },
+    //   select: { title: true }
+    // });
+    const rejectedTitles = rejectedRecords.map(m => m.title).join(", ");
+    console.log(rejectedTitles);
+    
 
+    // --- SERVICE SELECTION ---
 
-    // console.log(savedMovies[0].title);
-
-    const prompt = `
+    if (service == "gemini") {
+      // --- YOUR GEMINI PROMPT (UPDATED WITH REJECTIONS) ---
+      const geminiPrompt = `
 You are a knowledgeable film recommender.
 
 The user likes these movies:
-${savedMovies}
+${movieTitles}
+
+The user HAS REJECTED these movies (DO NOT RECOMMEND):
+${rejectedTitles}
 
 Task:
-Recommend movies based ONLY on what can be inferred from these titles.
+Recommend movies based ONLY on what can be inferred from the liked titles.
+
+CRITICAL RULES:
+- **Do NOT recommend any movie listed above in either the liked or rejected lists.**
+- **Do NOT recommend movies that are simple sequels/prequels to the lists above.**
 
 Instructions:
-- Infer shared emotional tone, intensity, themes, and storytelling approach
-- Do NOT default to universally popular or all-time-great movies
-- Avoid slow, sentimental, or purely contemplative films
-  unless they are clearly implied by the input
-- Do not force a single genre or mood
-- Let multiple influences coexist, but keep recommendations
-  close in energy and narrative drive to the input
-
-Requirements:
-- Recommend high-quality, well-reviewed films
-- Each recommendation should feel plausible for this specific viewer
+- Infer shared emotional tone, intensity, themes, and storytelling approach.
+- Avoid slow, sentimental, or purely contemplative films unless clearly implied.
+- Let multiple influences coexist, but keep recommendations close in energy.
+- Recommend high-quality, well-reviewed films.
 
 Output:
 Return a JSON object with exactly one key: "recommendations"
-The value must be an array of exactly 5 movie titles (strings)
+The value must be an array of exactly 8 movie titles (strings).
 Output JSON only. No explanations.
-
-    `;
-    console.log(service);
-    // 3. Construct the Prompt
-    // const prompt = `A user likes the following movies: ${savedMovies}. 
-    //   Based on these, recommend 5 similar movies of similar type.
-    //   Return the response as a simple JSON array of strings containing only the movie titles.
-    //   `;
-      
-
-    // 4. Call Gemini
-    if(service=="gemini"){
+      `;
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash", 
-        contents: prompt,
+        model: "gemini-2.0-flash",
+        contents: geminiPrompt,
         config: {
-          responseMimeType: "application/json", // Enforces JSON output
-        }
+          responseMimeType: "application/json",
+        },
       });
-      console.log(response.text);
+
       const rawText = response.text;
-  
-      // 5. Parse and Clean the response
-      // (Gemini sometimes wraps JSON in markdown blocks like \`\`\`json)
       const cleanedText = rawText.replace(/```json|```/g, "").trim();
-      const recommendations = JSON.parse(cleanedText);  
-      res.json({ recommendations });
-    }else if(service=="groq"){
+      const recommendations = JSON.parse(cleanedText);
+      
+      res.json({ recommendations: recommendations.recommendations });
+
+    } else if (service == "groq") {
+      // --- YOUR GROQ PROMPT (UPDATED WITH REJECTIONS) ---
+      const groqSystemMessage = "You are an expert film recommender. Analyze tone, intensity, and storytelling. Output valid JSON only.";
+      const groqUserMessage = `
+        User's favorite movies:
+        ${movieTitles}
+
+        Movies the user REJECTED (DO NOT RECOMMEND):
+        ${rejectedTitles}
+        
+        TASK:
+        Recommend 8 new movies based on these tastes.
+        
+        CRITICAL CONSTRAINT:
+        - **Do NOT recommend any of the movies listed in the favorites or rejected lists.**
+        - **Do NOT recommend direct sequels/prequels to the lists above.**
+
+        INSTRUCTIONS:
+        - Match energy, seriousness, and narrative momentum.
+        - Avoid slow, sentimental, or purely conceptual films unless clearly implied.
+        - Prefer films driven by human conflict and stakes.
+        
+        OUTPUT:
+        Return a JSON object with one key: "recommendations"
+        The value must be an array of exactly 8 movie titles (strings).
+        Output JSON only.
+      `;
+
       const completion = await client.chat.completions.create({
         model: "llama-3.3-70b-versatile",
         messages: [
-          {
-            role: "system",
-            content:
-              "You are an expert film recommender. Analyze tone, intensity, pacing, and storytelling to infer user taste. Output valid JSON only."
-          },
-          {
-            role: "user",
-            content: `
-      User's favorite movies:
-      ${savedMovies}
-      
-      TASK:
-      Infer the user's taste from the shared tone, intensity, conflict, pacing, and narrative drive.
-      
-      INSTRUCTIONS:
-      - Base recommendations strictly on the given movies
-      - Match energy, seriousness, and narrative momentum
-      - Let multiple influences coexist naturally
-      - Avoid slow, sentimental, or purely conceptual films unless clearly implied
-      - Prefer films driven by human conflict and stakes
-      - Do not force a single genre or mood
-      
-      QUALITY BAR:
-      Recommend well-regarded, thoughtfully made films that a viewer with this mix of tastes would plausibly enjoy.
-      
-      OUTPUT:
-      Return a JSON object with one key: "recommendations"
-      The value must be an array of exactly 5 movie titles (strings).
-      Output JSON only.
-            `,
-          },
+          { role: "system", content: groqSystemMessage },
+          { role: "user", content: groqUserMessage },
         ],
         response_format: { type: "json_object" },
-        temperature: 0.55,
+        temperature: 0.65,
       });
-      
-      
-      
-  
-      // 4. Parse the response
+
       const content = completion.choices[0].message.content;
       const parsedResult = JSON.parse(content);
+      
+      console.log(groqUserMessage);
+      console.log(parsedResult);
+      
       res.json({ recommendations: parsedResult.recommendations });
-    }else{
+
+    } else {
       res.status(400).json({ error: "Invalid service." });
     }
+
   } catch (error) {
     console.error("Recommendations error:", error);
-    res
-      .status(500)
-      .json({ error: "Internal server error during recommendations." });
+    res.status(500).json({ error: "Internal server error during recommendations." });
   }
 });
 
