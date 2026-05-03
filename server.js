@@ -18,7 +18,9 @@ const adapter = new PrismaPg({ connectionString: connectionString });
 const prisma = new PrismaClient({ adapter });
 
 const app = express();
+const HOST=process.env.PG_HOST;
 const PORT = process.env.PORT || 4000;
+// const PORT = process.env.PG_PORT || 4000;
 
 const axios = require("axios");
 
@@ -416,6 +418,12 @@ app.post("/auth/login", async (req, res) => {
     console.error("Login error:", error); // Log the error object, not user data
     res.status(500).json({ error: "Internal server error during login." });
   }
+});
+
+//logout 
+app.post("/auth/logout", authenticateToken, (req, res) => {
+  // Token is valid (authenticateToken passed), just acknowledge
+  res.status(200).json({ message: "Logged out successfully." });
 });
 
 // server.js (Updated Recommendations Route)
