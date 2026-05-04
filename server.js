@@ -326,14 +326,14 @@ app.post("/auth/register", async (req, res) => {
   }
 
   try {
-    //check if user already exists
-    // const existingUser = await prisma.users.findUnique({
-    //         where: { email: email },
-    //     });
+    // check if user already exists
+    const existingUser = await prisma.users.findUnique({
+            where: { email: email },
+        });
 
-    //     if (existingUser) {
-    //         return res.status(400).json({ error: 'User with this email already exists.' });
-    //     }
+        if (existingUser) {
+            return res.status(400).json({ error: 'User with this email already exists.' });
+        }
 
     // 1. Hash the pasword
     password = await bcrypt.hash(password, saltRounds);
